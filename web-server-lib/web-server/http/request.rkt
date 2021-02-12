@@ -155,9 +155,10 @@
      (define-values (decoded-ip decode-op)
        (make-pipe))
 
+     (define line-buf (make-bytes 4096))
      (define total-size
        (let loop ([total-size 0])
-         (define size-line (read-http-line/limited real-ip #:limit max-header-length))
+         (define size-line (read-http-line/limited real-ip line-buf #:limit max-header-length))
          (define size-in-bytes
            (match (regexp-split #rx";" size-line)
              [(cons size-in-hex _)
@@ -172,7 +173,7 @@
 
             ;; This is safe because of the preceding guard on new-size,
             (copy-bytes! size-in-bytes real-ip decode-op)
-            (read-http-line/limited real-ip #:limit 2)
+            (read-http-line/limited real-ip line-buf #:limit 2)
             (loop new-size)])))
 
      (define more-headers
@@ -223,8 +224,7 @@
 ; will attempt to read a line from the input port up to a hard limit.
 (define (read-http-line/limited #:limit limit
                                 [in (current-input-port)]
-                                [bufsize 128])
-  (define buf (make-bytes bufsize))
+                                [buf (make-bytes 4096)])
   (define-values (line-len suffix-len)
     (let loop ([offset 0]
                [boundary-CR? #f])
@@ -336,8 +336,9 @@
                  #:max-length (safety-limits-max-request-header-length limits)))
 
 (define (read-headers* in #:max-count max-heads #:max-length max-length)
+  (define line-buf (make-bytes 4096))
   (for/list ([count (in-naturals)]
-             [l (in-producer (λ (in max-length) (read-http-line/limited in #:limit max-length))
+             [l (in-producer (λ (in max-length) (read-http-line/limited in line-buf #:limit max-length))
                              (λ (l) (or (eof-object? l) (zero? (bytes-length l))))
                              in
                              max-length)])
@@ -352,15 +353,19 @@
 ; read-folded-head : iport bytes number -> bytes
 ; reads the next line of input for headers that are line-folded
 (define (read-folded-head in rhs max-length)
-  (match (peek-byte in)
-    ;; leading SPACE or TAB
-    [(or 32 9)
-     (define line (read-http-line/limited in #:limit max-length))
-     (define rhs* (bytes-append rhs line))
-     (when (> (bytes-length rhs*) max-length)
-       (network-error 'read-headers "header too long (~a)" max-length))
-     (read-folded-head in rhs* max-length)]
-    [_ rhs]))
+  (define line-buf (make-bytes 4096))
+  (let loop ([in in]
+             [rhs rhs]
+             [max-length max-length])
+    (match (peek-byte in)
+      ;; leading SPACE or TAB
+      [(or 32 9)
+       (define line (read-http-line/limited in line-buf #:limit max-length))
+       (define rhs* (bytes-append rhs line))
+       (when (> (bytes-length rhs*) max-length)
+         (network-error 'read-headers "header too long (~a)" max-length))
+       (loop in rhs* max-length)]
+      [_ rhs])))
 
 
 ;; **************************************************
@@ -648,6 +653,7 @@
                      (lambda (e)
                        (delete-file/safe (object-name content-in))
                        (raise e))])
+      (define line-buf (make-bytes 4096))
       (let read-loop ([len 0])
         (define n-read (peek-bytes-avail! buf 0 #f in))
         (when (eof-object? n-read)
@@ -702,7 +708,7 @@
                        maybe-crlf))
 
       ;; Read the next boundary.
-      (define line (read-http-line/limited in #:limit end-boundary-len))
+      (define line (read-http-line/limited in line-buf #:limit end-boundary-len))
       (define more-parts?
         (cond
           [(eof-object? line) (network-error 'read-mime-multipart "port closed prematurely")]
@@ -740,11 +746,12 @@
           (read-parts parts* total-files total-fields)
           (reverse parts*))))
 
+  (define line-buf (make-bytes 4096))
   (let skip-preamble ([preamble-line-count 0])
     (unless (< preamble-line-count MAX-PREAMBLE-LINES)
       (network-error 'read-mime-multipart "too many \"preamble\" lines"))
 
-    (define line (read-http-line/limited in #:limit MAX-PREAMBLE-LINE-LEN))
+    (define line (read-http-line/limited in line-buf #:limit MAX-PREAMBLE-LINE-LEN))
     (cond
       [(eof-object? line) (network-error 'read-mime-multipart "port closed prematurely")]
       [(bytes=? line start-boundary) (read-parts)]
